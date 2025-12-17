@@ -1,0 +1,49 @@
+name: Build AppCtrl
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build AppCtrl
+        # This runs 'npm run clean && vite build && tauri build'
+        # Output will be in src-tauri/target/release/appctrl.exe (since bundle is disabled)
+        run: npm run tauri build
+
+      # Case 1: Upload Artifact (for Push or Manual Run)
+      - name: Upload Artifact
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: AppCtrl-Windows
+          path: src-tauri/target/release/appctrl.exe
+          retention-days: 5
+
+      # Case 2: Upload Release Asset (for Release)
+      - name: Upload Release Asset
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: src-tauri/target/release/appctrl.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
