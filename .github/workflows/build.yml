@@ -18,9 +18,15 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: 'npm' # Cache NPM dependencies
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri # Chỉ định thư mục chứa Cargo.toml
 
       - name: Install dependencies
         run: npm install
