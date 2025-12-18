@@ -9,6 +9,8 @@ AppCtrl là một trình quản lý ứng dụng hiện đại, giao diện đ�
 *   **Quản lý tập trung**: Thêm và quản lý các ứng dụng EXE, BAT, Shell script trong một giao diện duy nhất.
 *   **Portable hoàn toàn**: Cấu hình và dữ liệu được lưu vào file `config.json` ngay cạnh file chạy, dễ dàng sao chép và di chuyển.
 *   **Giao diện hiện đại**: Thiết kế Glassmorphism, hiệu ứng mượt mà, hỗ trợ Dark Mode.
+*   **Task Killer 🗡️**: Tích hợp trình quản lý tác vụ mạnh mẽ. Xem danh sách tiến trình, gom nhóm theo tên, hiển thị dung lượng RAM sử dụng và tắt nhanh ứng dụng "treo".
+*   **Port Killer 🔪**: Công cụ "sát thủ" port. Xem nhanh các port đang mở, process nào đang chiếm dụng và kill process đó chỉ với 1 click. Cực hữu ích cho Developer.
 *   **Minimize to Tray**: Thu nhỏ xuống khay hệ thống để chạy ngầm, không chiếm chỗ trên Taskbar.
 *   **Giám sát trạng thái**: Tự động phát hiện ứng dụng đang chạy (dựa trên tên Process) và cập nhật trạng thái Real-time.
 *   **Icon sắc nét**: Tự động trích xuất icon độ phân giải cao (Jumbo 256x256) từ file EXE.
@@ -54,7 +56,7 @@ AppCtrl là một trình quản lý ứng dụng hiện đại, giao diện đ�
 npm run tauri build
 ```
 
-File kết quả sẽ nằm tại: `src-tauri/target/release/appctrl.exe`
+File kết quả sẽ nằm tại: `src-tauri/target/release/AppCtrl.exe`
 
 ## 📂 Cấu trúc dự án
 

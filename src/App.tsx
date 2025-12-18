@@ -1,11 +1,11 @@
 import type { Component } from 'solid-js';
-import { Show, For, createSignal, onCleanup, createEffect } from 'solid-js';
+import { Show, For, createSignal, onCleanup, createEffect, onMount } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { AppProvider, useApp } from './store/appStore';
-import type { AppType, AppConfig } from './types';
+import type { AppType, AppConfig, PortInfo, TaskInfo } from './types';
 import './index.css';
 
 
@@ -86,6 +86,22 @@ const MainWindow: Component = () => {
         </div>
         <div class="flex items-center gap-2">
           <button
+            onClick={actions.openTaskKillerModal}
+            class={`w-9 h-9 rounded-lg flex items-center justify-center transition-all hover:scale-105
+              ${store.settings.theme === 'dark' ? 'bg-white/5 hover:bg-white/10' : 'bg-black/5 hover:bg-black/10'}`}
+            title="Task Killer"
+          >
+            🗡️
+          </button>
+          <button
+            onClick={actions.openPortKillerModal}
+            class={`w-9 h-9 rounded-lg flex items-center justify-center transition-all hover:scale-105
+              ${store.settings.theme === 'dark' ? 'bg-white/5 hover:bg-white/10' : 'bg-black/5 hover:bg-black/10'}`}
+            title="Port Killer"
+          >
+            🔪
+          </button>
+          <button
             onClick={toggleTheme}
             class={`w-9 h-9 rounded-lg flex items-center justify-center transition-all hover:scale-105
               ${store.settings.theme === 'dark' ? 'bg-white/5 hover:bg-white/10' : 'bg-black/5 hover:bg-black/10'}`}
@@ -150,6 +166,12 @@ const MainWindow: Component = () => {
       </Show>
       <Show when={store.modal.type === 'settings'}>
         <SettingsModal />
+      </Show>
+      <Show when={store.modal.type === 'port-killer'}>
+        <PortKillerModal />
+      </Show>
+      <Show when={store.modal.type === 'task-killer'}>
+        <TaskKillerModal />
       </Show>
     </div>
   );
@@ -650,6 +672,295 @@ const SettingsModal: Component = () => {
         </div>
 
         <button onClick={actions.closeModal} class={`w-full mt-4 py-2.5 rounded-lg text-sm transition-colors ${btnClass}`}>Đóng</button>
+      </div>
+    </div>
+  );
+};
+
+// Port Killer Modal
+const PortKillerModal: Component = () => {
+  const [store, actions] = useApp();
+  const [ports, setPorts] = createSignal<PortInfo[]>([]);
+  const [search, setSearch] = createSignal('');
+  const [loading, setLoading] = createSignal(true);
+  const isDark = () => store.settings.theme === 'dark';
+
+  const modalClass = isDark() ? 'bg-slate-800 border-white/10 text-white' : 'bg-white border-gray-200 text-gray-900';
+  const inputClass = isDark()
+    ? 'bg-white/5 border-white/10 focus:border-blue-500/50 placeholder-white/20'
+    : 'bg-gray-50 border-gray-200 focus:border-blue-500 focus:bg-white placeholder-gray-400';
+  const itemClass = isDark() ? 'bg-white/5 border-white/10' : 'bg-gray-50 border-gray-200';
+  const textSubClass = isDark() ? 'text-white/50' : 'text-gray-500';
+
+  const loadPorts = async () => {
+    setLoading(true);
+    try {
+      const data = await invoke<PortInfo[]>('get_listening_ports');
+      setPorts(data);
+    } catch (e) {
+      console.error('Failed to load ports:', e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  onMount(loadPorts);
+
+  const handleKill = async (pid: number) => {
+    try {
+      await invoke('kill_process_by_pid', { pid });
+      await loadPorts(); // Refresh
+    } catch (e) {
+      console.error('Failed to kill process:', e);
+    }
+  };
+
+  const filteredPorts = () => {
+    const s = search().toLowerCase();
+    return ports().filter(p =>
+      p.name.toLowerCase().includes(s) ||
+      p.port.toString().includes(s) ||
+      p.pid.toString().includes(s)
+    );
+  };
+
+  return (
+    <div class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={actions.closeModal}>
+      <div class={`${modalClass} rounded-2xl p-5 w-full max-w-lg shadow-2xl border transition-colors duration-300 flex flex-col max-h-[80vh]`} onClick={e => e.stopPropagation()}>
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-semibold">🔪 Port Killer</h2>
+          <div class="flex gap-2">
+            <button onClick={loadPorts} class={`p-2 rounded-lg transition-colors ${isDark() ? 'hover:bg-white/10' : 'hover:bg-gray-100'}`} title="Refresh">
+              🔄
+            </button>
+            <button onClick={actions.closeModal} class={`p-2 rounded-lg transition-colors ${isDark() ? 'hover:bg-white/10' : 'hover:bg-gray-100'}`} title="Close">
+              ❌
+            </button>
+          </div>
+        </div>
+
+        <input
+          type="text"
+          value={search()}
+          onInput={e => setSearch(e.currentTarget.value)}
+          placeholder="Search by port, name or PID..."
+          class={`w-full px-3 py-2 rounded-lg border outline-none text-sm mb-4 transition-colors ${inputClass}`}
+        />
+
+        <div class="flex-1 overflow-auto space-y-2 min-h-[300px]">
+          <Show when={!loading()} fallback={
+            <div class={`flex items-center justify-center h-full ${textSubClass}`}>Loading...</div>
+          }>
+            <Show when={filteredPorts().length > 0} fallback={
+              <div class={`text-center py-10 ${textSubClass}`}>No processes found</div>
+            }>
+              <For each={filteredPorts()}>
+                {(p) => (
+                  <div class={`flex items-center justify-between p-3 rounded-xl border ${itemClass}`}>
+                    <div class="flex items-center gap-3 overflow-hidden">
+                      <div class={`w-10 h-10 rounded-lg flex items-center justify-center font-bold text-xs flex-shrink-0 ${isDark() ? 'bg-white/10' : 'bg-white border border-gray-200'}`}>
+                        {p.port}
+                      </div>
+                      <div class="min-w-0">
+                        <p class="font-medium truncate text-sm">{p.name}</p>
+                        <p class={`text-xs truncate ${textSubClass}`}>PID: {p.pid} • {p.protocol}</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => handleKill(p.pid)}
+                      class="px-3 py-1.5 rounded-lg bg-red-500/10 text-red-500 hover:bg-red-500/20 text-xs font-medium border border-red-500/20 transition-colors flex-shrink-0"
+                    >
+                      Kill
+                    </button>
+                  </div>
+                )}
+              </For>
+            </Show>
+          </Show>
+        </div>
+
+
+      </div>
+    </div>
+  );
+};
+
+// Task Killer Modal
+const TaskKillerModal: Component = () => {
+  const [store, actions] = useApp();
+  const [tasks, setTasks] = createSignal<TaskInfo[]>([]);
+  const [search, setSearch] = createSignal('');
+  const [loading, setLoading] = createSignal(true);
+  const [expandedGroups, setExpandedGroups] = createSignal<Set<string>>(new Set());
+
+  const isDark = () => store.settings.theme === 'dark';
+
+  const modalClass = isDark() ? 'bg-slate-800 border-white/10 text-white' : 'bg-white border-gray-200 text-gray-900';
+  const inputClass = isDark()
+    ? 'bg-white/5 border-white/10 focus:border-blue-500/50 placeholder-white/20'
+    : 'bg-gray-50 border-gray-200 focus:border-blue-500 focus:bg-white placeholder-gray-400';
+  const itemClass = isDark() ? 'bg-white/5 border-white/10' : 'bg-gray-50 border-gray-200';
+  const textSubClass = isDark() ? 'text-white/50' : 'text-gray-500';
+
+  const loadTasks = async () => {
+    setLoading(true);
+    try {
+      const data = await invoke<TaskInfo[]>('get_processes');
+      setTasks(data);
+    } catch (e) {
+      console.error('Failed to load tasks:', e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  onMount(loadTasks);
+
+  const handleKill = async (pid: number) => {
+    try {
+      await invoke('kill_process_by_pid', { pid });
+      await loadTasks(); // Refresh
+    } catch (e) {
+      console.error('Failed to kill task:', e);
+    }
+  };
+
+  const handleKillGroup = async (name: string) => {
+    try {
+      await invoke('kill_process_by_name', { name });
+      await loadTasks(); // Refresh
+    } catch (e) {
+      console.error('Failed to kill task group:', e);
+    }
+  };
+
+  const toggleGroup = (name: string) => {
+    setExpandedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+
+  const parseMemory = (mem: string): number => {
+    // Remove non-digits to get raw integer KB value
+    return parseInt(mem.replace(/\D/g, '')) || 0;
+  };
+
+  const formatMemory = (kb: number): string => {
+    if (kb > 1024 * 1024) return `${(kb / (1024 * 1024)).toFixed(1)} GB`;
+    if (kb > 1024) return `${(kb / 1024).toFixed(1)} MB`;
+    return `${kb} KB`;
+  };
+
+  const getGroupedTasks = () => {
+    const s = search().toLowerCase();
+    const filtered = tasks().filter(t =>
+      t.name.toLowerCase().includes(s) ||
+      t.pid.toString().includes(s)
+    );
+
+    const groups: Record<string, TaskInfo[]> = {};
+    filtered.forEach(t => {
+      if (!groups[t.name]) groups[t.name] = [];
+      groups[t.name].push(t);
+    });
+
+    return Object.entries(groups).map(([name, items]) => {
+      const totalMem = items.reduce((acc, item) => acc + parseMemory(item.memory), 0);
+      return { name, items, totalMem };
+    }).sort((a, b) => b.totalMem - a.totalMem);
+  };
+
+  return (
+    <div class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={actions.closeModal}>
+      <div class={`${modalClass} rounded-2xl p-5 w-full max-w-lg shadow-2xl border transition-colors duration-300 flex flex-col max-h-[80vh]`} onClick={e => e.stopPropagation()}>
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-semibold">🗡️ Task Killer</h2>
+          <div class="flex gap-2">
+            <button onClick={loadTasks} class={`p-2 rounded-lg transition-colors ${isDark() ? 'hover:bg-white/10' : 'hover:bg-gray-100'}`} title="Refresh">
+              🔄
+            </button>
+            <button onClick={actions.closeModal} class={`p-2 rounded-lg transition-colors ${isDark() ? 'hover:bg-white/10' : 'hover:bg-gray-100'}`} title="Close">
+              ❌
+            </button>
+          </div>
+        </div>
+
+        <input
+          type="text"
+          value={search()}
+          onInput={e => setSearch(e.currentTarget.value)}
+          placeholder="Search by name or PID..."
+          class={`w-full px-3 py-2 rounded-lg border outline-none text-sm mb-4 transition-colors ${inputClass}`}
+        />
+
+        <div class="flex-1 overflow-auto space-y-2 min-h-[300px]">
+          <Show when={!loading()} fallback={
+            <div class={`flex items-center justify-center h-full ${textSubClass}`}>Loading...</div>
+          }>
+            <Show when={getGroupedTasks().length > 0} fallback={
+              <div class={`text-center py-10 ${textSubClass}`}>No tasks found</div>
+            }>
+              <For each={getGroupedTasks()}>
+                {(group) => (
+                  <div class={`rounded-xl border overflow-hidden ${itemClass}`}>
+                    {/* Header Row */}
+                    <div
+                      class={`flex items-center justify-between p-3 cursor-pointer transition-colors ${isDark() ? 'hover:bg-white/5' : 'hover:bg-gray-50'}`}
+                      onClick={() => toggleGroup(group.name)}
+                    >
+                      <div class="flex items-center gap-3 overflow-hidden">
+                        <div class={`w-6 h-6 flex items-center justify-center transition-transform ${expandedGroups().has(group.name) ? 'rotate-90' : ''}`}>
+                          ▶
+                        </div>
+                        <div class="min-w-0">
+                          <p class="font-medium truncate text-sm flex items-center gap-2">
+                            {group.name}
+                            <span class={`text-xs px-1.5 py-0.5 rounded-full ${isDark() ? 'bg-white/10' : 'bg-gray-200'}`}>
+                              {group.items.length}
+                            </span>
+                          </p>
+                          <p class={`text-xs truncate ${textSubClass}`}>Total: {formatMemory(group.totalMem)}</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleKillGroup(group.name); }}
+                        class="px-3 py-1.5 rounded-lg bg-red-500/10 text-red-500 hover:bg-red-500/20 text-xs font-medium border border-red-500/20 transition-colors flex-shrink-0"
+                      >
+                        Kill All
+                      </button>
+                    </div>
+
+                    {/* Expanded Items */}
+                    <Show when={expandedGroups().has(group.name)}>
+                      <div class={`border-t ${isDark() ? 'border-white/5 bg-black/20' : 'border-gray-100 bg-gray-50/50'}`}>
+                        <For each={group.items}>
+                          {(item) => (
+                            <div class="flex items-center justify-between px-3 py-2 pl-12 text-xs hover:bg-black/5 dark:hover:bg-white/5">
+                              <div class={textSubClass}>
+                                PID: {item.pid} • {formatMemory(parseMemory(item.memory))}
+                              </div>
+                              <button
+                                onClick={() => handleKill(item.pid)}
+                                class={`px-2 py-1 rounded hover:bg-red-500/10 hover:text-red-500 transition-colors ${textSubClass}`}
+                              >
+                                Kill
+                              </button>
+                            </div>
+                          )}
+                        </For>
+                      </div>
+                    </Show>
+                  </div>
+                )}
+              </For>
+            </Show>
+          </Show>
+        </div>
+
+
       </div>
     </div>
   );

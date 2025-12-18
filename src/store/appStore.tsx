@@ -22,6 +22,8 @@ interface AppActions {
     openAddModal: () => void;
     openEditModal: (appId: string) => void;
     openSettingsModal: () => void;
+    openPortKillerModal: () => void;
+    openTaskKillerModal: () => void;
     closeModal: () => void;
     setAppRunning: (id: string, running: boolean) => void;
     appendLog: (appId: string, line: string) => void;
@@ -99,6 +101,8 @@ export const AppProvider: ParentComponent = (props) => {
         openAddModal: () => setStore('modal', { type: 'add' }),
         openEditModal: (appId) => setStore('modal', { type: 'edit', appId }),
         openSettingsModal: () => setStore('modal', { type: 'settings' }),
+        openPortKillerModal: () => setStore('modal', { type: 'port-killer' }),
+        openTaskKillerModal: () => setStore('modal', { type: 'task-killer' }),
         closeModal: () => setStore('modal', { type: 'closed' }),
 
         setAppRunning: (id, running) => {

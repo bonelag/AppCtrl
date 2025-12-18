@@ -1,9 +1,13 @@
 [package]
 name = "appctrl"
-version = "1.0.1"
+version = "1.1.0"
 description = "Simple application launcher"
 authors = ["AppCtrl"]
 edition = "2021"
+
+[[bin]]
+name = "AppCtrl"
+path = "src/main.rs"
 
 [lib]
 name = "appctrl_lib"

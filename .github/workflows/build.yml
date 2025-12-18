@@ -45,7 +45,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: AppCtrl-Windows
-          path: src-tauri/target/release/appctrl.exe
+          path: src-tauri/target/release/AppCtrl.exe
           retention-days: 5
 
       # Case 2: Upload Release Asset (for Release)
@@ -53,6 +53,6 @@ jobs:
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v1
         with:
-          files: src-tauri/target/release/appctrl.exe
+          files: src-tauri/target/release/AppCtrl.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

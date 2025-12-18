@@ -462,6 +462,223 @@ fn save_config(config: String) -> Result<(), String> {
     std::fs::write(path, config).map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+struct PortInfo {
+    port: u16,
+    pid: u32,
+    name: String,
+    protocol: String,
+}
+
+#[tauri::command]
+async fn get_listening_ports() -> Result<Vec<PortInfo>, String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        
+        // 1. Get all processes (PID -> Name)
+        let output = Command::new("tasklist")
+            .args(["/FO", "CSV", "/NH"])
+            .creation_flags(0x08000000)
+            .output()
+            .map_err(|e| format!("Failed to run tasklist: {}", e))?;
+            
+        let tasklist_out = String::from_utf8_lossy(&output.stdout);
+        let mut pid_map = HashMap::new();
+        
+        for line in tasklist_out.lines() {
+            // CSV format: "Name","PID",...
+            let parts: Vec<&str> = line.split("\",\"").collect();
+            if parts.len() >= 2 {
+                let name = parts[0].trim_matches('"').to_string();
+                let pid_str = parts[1].trim_matches('"');
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    pid_map.insert(pid, name);
+                }
+            }
+        }
+        
+        // 2. Get listening ports
+        let output = Command::new("netstat")
+            .args(["-ano"])
+            .creation_flags(0x08000000)
+            .output()
+            .map_err(|e| format!("Failed to run netstat: {}", e))?;
+            
+        let netstat_out = String::from_utf8_lossy(&output.stdout);
+        let mut ports = Vec::new();
+        
+        for line in netstat_out.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            // Expected: Proto, Local Address, Foreign Address, State, PID
+            // TCP 0.0.0.0:80 0.0.0.0:0 LISTENING 1234
+            // UDP 0.0.0.0:123 *:* 1234
+            
+            if parts.len() >= 5 && parts[0] == "TCP" && parts[3] == "LISTENING" {
+                let local_addr = parts[1];
+                let pid_str = parts[4];
+                
+                if let Some(port_str) = local_addr.split(':').last() {
+                    if let (Ok(port), Ok(pid)) = (port_str.parse::<u16>(), pid_str.parse::<u32>()) {
+                        let name = pid_map.get(&pid).cloned().unwrap_or_else(|| "Unknown".to_string());
+                        ports.push(PortInfo {
+                            port,
+                            pid,
+                            name,
+                            protocol: "TCP".to_string(),
+                        });
+                    }
+                }
+            } else if parts.len() >= 4 && parts[0] == "UDP" {
+                // UDP doesn't have "State" column usually, PID is at index 3
+                let local_addr = parts[1];
+                let pid_str = parts[3];
+                 if let Some(port_str) = local_addr.split(':').last() {
+                    if let (Ok(port), Ok(pid)) = (port_str.parse::<u16>(), pid_str.parse::<u32>()) {
+                        let name = pid_map.get(&pid).cloned().unwrap_or_else(|| "Unknown".to_string());
+                        ports.push(PortInfo {
+                            port,
+                            pid,
+                            name,
+                            protocol: "UDP".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        
+        // Sort by port
+        ports.sort_by_key(|p| p.port);
+        // Deduplicate (sometimes netstat shows multiple lines for same socket)
+        ports.dedup_by(|a, b| a.port == b.port && a.pid == b.pid && a.protocol == b.protocol);
+        
+        Ok(ports)
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Not supported on non-Windows yet".to_string())
+    }
+}
+
+
+#[tauri::command]
+async fn kill_process_by_pid(pid: u32) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let output = Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .creation_flags(0x08000000)
+            .output()
+            .map_err(|e| e.to_string())?;
+            
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).to_string())
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Not supported on non-Windows yet".to_string())
+    }
+}
+
+#[tauri::command]
+async fn kill_process_by_name(name: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let output = Command::new("taskkill")
+            .args(["/F", "/IM", &name])
+            .creation_flags(0x08000000)
+            .output()
+            .map_err(|e| e.to_string())?;
+            
+        if output.status.success() {
+            Ok(())
+        } else {
+            // Check if error is "The process ... not found" (which means success effectively)
+            let err = String::from_utf8_lossy(&output.stderr).to_string();
+            if err.contains("not found") {
+                Ok(())
+            } else {
+                Err(err)
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Not supported on non-Windows yet".to_string())
+    }
+}
+
+#[derive(serde::Serialize)]
+struct ProcessInfo {
+    pid: u32,
+    name: String,
+    memory: String,
+}
+
+#[tauri::command]
+async fn get_processes() -> Result<Vec<ProcessInfo>, String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let output = Command::new("tasklist")
+            .args(["/FO", "CSV", "/NH"])
+            .creation_flags(0x08000000)
+            .output()
+            .map_err(|e| format!("Failed to run tasklist: {}", e))?;
+
+        let tasklist_out = String::from_utf8_lossy(&output.stdout);
+        let mut processes = Vec::new();
+        
+        let system_processes = [
+            "System Idle Process", "System", "Registry", "smss.exe", "csrss.exe", 
+            "wininit.exe", "services.exe", "lsass.exe", "svchost.exe", "fontdrvhost.exe", 
+            "dwm.exe", "winlogon.exe", "spoolsv.exe", "Memory Compression", "taskhostw.exe",
+            "RuntimeBroker.exe", "SearchUI.exe", "ShellExperienceHost.exe", "ApplicationFrameHost.exe",
+            "ctfmon.exe", "conhost.exe", "dllhost.exe", "sihost.exe", "SearchApp.exe",
+            "StartMenuExperienceHost.exe", "TextInputHost.exe", "SecurityHealthService.exe",
+            "NisSrv.exe", "MsMpEng.exe", "audiodg.exe"
+        ];
+
+        for line in tasklist_out.lines() {
+            // "Name","PID","Session Name","Session#","Mem Usage"
+            let parts: Vec<&str> = line.split("\",\"").collect();
+            if parts.len() >= 5 {
+                let name = parts[0].trim_matches('"').to_string();
+                
+                // Filter system processes
+                if system_processes.iter().any(|&s| s.eq_ignore_ascii_case(&name)) {
+                    continue;
+                }
+
+                let pid_str = parts[1].trim_matches('"');
+                let mem_str = parts[4].trim_matches('"'); // e.g. "12,345 K"
+                
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    processes.push(ProcessInfo {
+                        pid,
+                        name,
+                        memory: mem_str.to_string(),
+                    });
+                }
+            }
+        }
+        
+        // Sort by name
+        processes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        
+        Ok(processes)
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Not supported on non-Windows yet".to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -520,7 +737,11 @@ pub fn run() {
             check_process_running,
             set_minimize_to_tray,
             load_config,
-            save_config
+            save_config,
+            get_listening_ports,
+            kill_process_by_pid,
+            kill_process_by_name,
+            get_processes
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
