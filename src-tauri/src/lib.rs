@@ -681,6 +681,20 @@ async fn get_processes() -> Result<Vec<ProcessInfo>, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Check for local WebView2 Fixed Version
+    #[cfg(windows)]
+    {
+        use std::env;
+        if let Ok(current_exe) = env::current_exe() {
+            if let Some(exe_dir) = current_exe.parent() {
+                let webview2_path = exe_dir.join("WebView2");
+                if webview2_path.exists() {
+                    env::set_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", webview2_path);
+                }
+            }
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
