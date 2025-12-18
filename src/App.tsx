@@ -275,12 +275,12 @@ const AppCard: Component<{
 
       {/* Hover Controls */}
       <Show when={isHovered()}>
-        <div class="absolute inset-0 bg-black/70 backdrop-blur-sm rounded-xl flex items-center justify-center">
+        <div class={`absolute inset-0 backdrop-blur-sm rounded-xl flex items-center justify-center ${store.settings.theme === 'dark' ? 'bg-black/70' : 'bg-white/60'}`}>
           {/* Play/Stop */}
           <button
             onClick={handleRun}
-            class={`w-10 h-10 rounded-full flex items-center justify-center text-lg transition-transform hover:scale-110
-                ${props.app.isRunning ? 'bg-red-500' : 'bg-green-500'}`}
+            class={`w-10 h-10 rounded-full flex items-center justify-center text-lg transition-transform hover:scale-110 shadow-lg
+                ${props.app.isRunning ? 'bg-red-500 text-white' : 'bg-green-500 text-white'}`}
           >
             {props.app.isRunning ? '⏹' : '▶'}
           </button>
@@ -288,7 +288,8 @@ const AppCard: Component<{
           {/* Edit */}
           <button
             onClick={handleEdit}
-            class="absolute top-1.5 left-1.5 w-6 h-6 rounded bg-white/10 hover:bg-white/20 flex items-center justify-center text-xs"
+            class={`absolute top-1.5 left-1.5 w-6 h-6 rounded flex items-center justify-center text-xs transition-colors
+              ${store.settings.theme === 'dark' ? 'bg-white/10 hover:bg-white/20 text-white' : 'bg-black/5 hover:bg-black/10 text-black'}`}
           >
             ✏️
           </button>
