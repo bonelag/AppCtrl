@@ -98,8 +98,24 @@ export const FileExplorerModal: Component = () => {
     const [addressInput, setAddressInput] = createSignal<string>('');
     const [selectedItemPath, setSelectedItemPath] = createSignal<string | null>(null);
     
+    const [folderSizes, setFolderSizes] = createSignal<Record<string, number>>({});
+    const [scanningPaths, setScanningPaths] = createSignal<Record<string, boolean>>({});
+    
     // Clipboard: { path: string, isDir: boolean, name: string }
     const [clipboard, setClipboard] = createSignal<{ path: string; isDir: boolean; name: string } | null>(null);
+
+    const scanFolderSize = async (path: string) => {
+        setScanningPaths(prev => ({ ...prev, [path]: true }));
+        try {
+            const size = await invoke<number>('get_directory_size', { path });
+            setFolderSizes(prev => ({ ...prev, [path]: size }));
+        } catch (e) {
+            console.error(e);
+            await message(`Lỗi khi quét dung lượng: ${e}`, { title: 'Lỗi', kind: 'error' });
+        } finally {
+            setScanningPaths(prev => ({ ...prev, [path]: false }));
+        }
+    };
     
     // Context Menu: { x: number, y: number, show: boolean, item?: FileInfo }
     const [contextMenu, setContextMenu] = createSignal<{ x: number; y: number; show: boolean; item?: FileInfo }>({
@@ -493,8 +509,41 @@ export const FileExplorerModal: Component = () => {
                                                     </div>
                                                     
                                                     {/* Size Column */}
-                                                    <div class="w-[25%] text-right text-xs text-gray-400 pr-2">
-                                                        {formatBytes(file.size)}
+                                                    <div class="w-[25%] text-right text-xs text-gray-400 pr-2 flex items-center justify-end">
+                                                        <Show 
+                                                            when={file.isDir} 
+                                                            fallback={<span>{formatBytes(file.size)}</span>}
+                                                        >
+                                                            <Show 
+                                                                when={scanningPaths()[file.path]} 
+                                                                fallback={
+                                                                    <Show 
+                                                                        when={folderSizes()[file.path] !== undefined}
+                                                                        fallback={
+                                                                            <button
+                                                                                onClick={(e) => {
+                                                                                    e.stopPropagation();
+                                                                                    scanFolderSize(file.path);
+                                                                                }}
+                                                                                class={`px-2 py-0.5 rounded-md text-[10px] font-semibold border transition-all active:scale-95
+                                                                                    ${isDark() 
+                                                                                        ? 'bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border-blue-500/20 hover:border-blue-500/40' 
+                                                                                        : 'bg-blue-50 hover:bg-blue-100 text-blue-600 border-blue-200 hover:border-blue-300'}`}
+                                                                            >
+                                                                                Scan
+                                                                            </button>
+                                                                        }
+                                                                    >
+                                                                        <span>{formatBytes(folderSizes()[file.path] || 0)}</span>
+                                                                    </Show>
+                                                                }
+                                                            >
+                                                                <span class="flex items-center gap-1 text-gray-500 dark:text-gray-400 animate-pulse font-medium">
+                                                                    <span class="inline-block w-2.5 h-2.5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></span>
+                                                                    Quét...
+                                                                </span>
+                                                            </Show>
+                                                        </Show>
                                                     </div>
                                                 </div>
                                             )}

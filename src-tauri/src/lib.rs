@@ -891,15 +891,17 @@ fn get_disks() -> Result<Vec<DiskInfo>, String> {
     Err("Not supported on non-Windows".to_string())
 }
 
-fn get_dir_size(path: &std::path::Path) -> u64 {
+#[tauri::command]
+fn get_directory_size(path: String) -> Result<u64, String> {
+    let path_buf = std::path::Path::new(&path);
+    if !path_buf.exists() || !path_buf.is_dir() {
+        return Err("Đường dẫn không hợp lệ hoặc không phải thư mục".to_string());
+    }
+    
     let mut total = 0;
-    let mut stack = vec![path.to_path_buf()];
-    let mut files_scanned = 0;
+    let mut stack = vec![path_buf.to_path_buf()];
     
     while let Some(current_path) = stack.pop() {
-        if files_scanned > 2000 {
-            break;
-        }
         if let Ok(entries) = std::fs::read_dir(current_path) {
             for entry in entries.flatten() {
                 let p = entry.path();
@@ -907,12 +909,11 @@ fn get_dir_size(path: &std::path::Path) -> u64 {
                     stack.push(p);
                 } else if let Ok(meta) = entry.metadata() {
                     total += meta.len();
-                    files_scanned += 1;
                 }
             }
         }
     }
-    total
+    Ok(total)
 }
 
 #[tauri::command]
@@ -936,7 +937,7 @@ fn read_directory(path: String) -> Result<Vec<FileInfo>, String> {
             
             let metadata = entry.metadata().ok();
             let size = if is_dir {
-                get_dir_size(&path)
+                0
             } else {
                 metadata.as_ref().map(|m| m.len()).unwrap_or(0)
             };
@@ -1430,6 +1431,7 @@ pub fn run() {
             get_processes,
             get_disks,
             read_directory,
+            get_directory_size,
             get_system_icon,
             open_in_explorer,
             paste_file,
