@@ -7,6 +7,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { AppProvider, useApp } from './store/appStore';
 import type { AppType, AppConfig, PortInfo, TaskInfo } from './types';
 import './index.css';
+import { FileExplorerModal } from './FileExplorerModal';
 
 
 const App: Component = () => {
@@ -85,6 +86,14 @@ const MainWindow: Component = () => {
           <span class="font-semibold text-lg tracking-tight">AppCtrl</span>
         </div>
         <div class="flex items-center gap-2">
+          <button
+            onClick={actions.openFileExplorerModal}
+            class={`w-9 h-9 rounded-lg flex items-center justify-center transition-all hover:scale-105
+              ${store.settings.theme === 'dark' ? 'bg-white/5 hover:bg-white/10' : 'bg-black/5 hover:bg-black/10'}`}
+            title="File Explorer"
+          >
+            📁
+          </button>
           <button
             onClick={actions.openTaskKillerModal}
             class={`w-9 h-9 rounded-lg flex items-center justify-center transition-all hover:scale-105
@@ -172,6 +181,9 @@ const MainWindow: Component = () => {
       </Show>
       <Show when={store.modal.type === 'task-killer'}>
         <TaskKillerModal />
+      </Show>
+      <Show when={store.modal.type === 'file-explorer'}>
+        <FileExplorerModal />
       </Show>
     </div>
   );

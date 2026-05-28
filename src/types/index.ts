@@ -21,7 +21,23 @@ export type ModalState =
     | { type: 'edit'; appId: string }
     | { type: 'settings' }
     | { type: 'port-killer' }
-    | { type: 'task-killer' };
+    | { type: 'task-killer' }
+    | { type: 'file-explorer' };
+
+export interface DiskInfo {
+    name: string;
+    totalSpace: number;
+    freeSpace: number;
+}
+
+export interface FileInfo {
+    name: string;
+    path: string;
+    isDir: boolean;
+    size: number;
+    modified: number;
+    extension: string;
+}
 
 // Settings
 export interface AppSettings {

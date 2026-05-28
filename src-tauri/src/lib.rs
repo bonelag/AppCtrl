@@ -4,7 +4,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, Submenu},
     AppHandle, Emitter, Manager,
 };
 
@@ -679,6 +679,635 @@ async fn get_processes() -> Result<Vec<ProcessInfo>, String> {
     }
 }
 
+#[derive(serde::Deserialize, serde::Serialize, Clone)]
+struct AppConfig {
+    id: String,
+    name: String,
+    #[serde(rename = "executablePath")]
+    executable_path: String,
+    #[serde(rename = "appType")]
+    app_type: String,
+    #[serde(rename = "workingDirectory")]
+    working_directory: Option<String>,
+    #[serde(rename = "arguments")]
+    arguments: Option<String>,
+    #[serde(rename = "environmentVars")]
+    environment_vars: Option<String>,
+    #[serde(rename = "icon")]
+    icon: Option<String>,
+    #[serde(rename = "isRunning")]
+    is_running: Option<bool>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Default)]
+struct ConfigData {
+    apps: Option<Vec<AppConfig>>,
+}
+
+fn build_tray_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let show = MenuItem::with_id(app, "show", "Show AppCtrl", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    
+    let config_json = load_config().unwrap_or_else(|_| "{}".to_string());
+    let config: ConfigData = serde_json::from_str(&config_json).unwrap_or_default();
+    
+    let mut submenu_items = Vec::new();
+    
+    if let Some(apps) = config.apps {
+        for app_conf in apps {
+            let is_running = check_process_running(app_conf.executable_path.clone());
+            let icon = if is_running { "🟢" } else { "🔴" };
+            let title = format!("{} {}", icon, app_conf.name);
+            let id = format!("toggle_app:{}", app_conf.id);
+            
+            if let Ok(item) = MenuItem::with_id(app, &id, &title, true, None::<&str>) {
+                submenu_items.push(item);
+            }
+        }
+    }
+    
+    let mut item_refs: Vec<&dyn tauri::menu::IsMenuItem<R>> = Vec::new();
+    for item in &submenu_items {
+        item_refs.push(item);
+    }
+    
+    let open_submenu = Submenu::with_items(app, "Open", true, &item_refs)?;
+    
+    Menu::with_items(app, &[&show, &open_submenu, &quit])
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiskInfo {
+    name: String,
+    total_space: u64,
+    free_space: u64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileInfo {
+    name: String,
+    path: String,
+    is_dir: bool,
+    size: u64,
+    modified: u64,
+    extension: String,
+}
+
+#[cfg(windows)]
+unsafe fn hicon_to_base64(hicon: winapi::shared::windef::HICON) -> Result<String, String> {
+    use winapi::um::winuser::{GetIconInfo, ICONINFO};
+    use winapi::um::wingdi::{
+        GetDIBits, CreateCompatibleDC, DeleteDC, GetObjectW, BITMAP, BITMAPINFO, 
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DeleteObject,
+    };
+    
+    let mut icon_info: ICONINFO = std::mem::zeroed();
+    if GetIconInfo(hicon, &mut icon_info) == 0 {
+        return Err("Failed to get icon info".to_string());
+    }
+    
+    let mut bmp: BITMAP = std::mem::zeroed();
+    GetObjectW(
+        icon_info.hbmColor as _,
+        std::mem::size_of::<BITMAP>() as i32,
+        &mut bmp as *mut _ as *mut _,
+    );
+    
+    let width = bmp.bmWidth as usize;
+    let height = bmp.bmHeight as usize;
+    
+    if width == 0 || height == 0 {
+        DeleteObject(icon_info.hbmColor as _);
+        DeleteObject(icon_info.hbmMask as _);
+        return Err("Invalid icon dimensions".to_string());
+    }
+    
+    let hdc = CreateCompatibleDC(std::ptr::null_mut());
+    
+    let mut bmi: BITMAPINFO = std::mem::zeroed();
+    bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    bmi.bmiHeader.biWidth = width as i32;
+    bmi.bmiHeader.biHeight = -(height as i32); // Top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    
+    let mut pixels: Vec<u8> = vec![0; width * height * 4];
+    GetDIBits(
+        hdc,
+        icon_info.hbmColor,
+        0,
+        height as u32,
+        pixels.as_mut_ptr() as *mut _,
+        &mut bmi,
+        DIB_RGB_COLORS,
+    );
+    
+    for chunk in pixels.chunks_mut(4) {
+        chunk.swap(0, 2);
+    }
+    
+    DeleteDC(hdc);
+    DeleteObject(icon_info.hbmColor as _);
+    DeleteObject(icon_info.hbmMask as _);
+    
+    let img = image::RgbaImage::from_raw(width as u32, height as u32, pixels)
+        .ok_or("Failed to create image")?;
+    
+    let mut png_data: Vec<u8> = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png_data), image::ImageFormat::Png)
+        .map_err(|e| format!("Failed to encode PNG: {}", e))?;
+    
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png_data);
+    Ok(format!("data:image/png;base64,{}", b64))
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn get_disks() -> Result<Vec<DiskInfo>, String> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use winapi::um::fileapi::{GetLogicalDriveStringsW, GetDiskFreeSpaceExW};
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    unsafe {
+        let mut buffer = [0u16; 256];
+        let len = GetLogicalDriveStringsW(buffer.len() as u32, buffer.as_mut_ptr());
+        if len == 0 || len > buffer.len() as u32 {
+            return Err("Failed to get logical drives".to_string());
+        }
+        
+        let mut disks = Vec::new();
+        let mut start = 0;
+        for i in 0..len as usize {
+            if buffer[i] == 0 {
+                if start < i {
+                    let drive_utf16 = &buffer[start..i];
+                    let os_str = OsString::from_wide(drive_utf16);
+                    if let Some(drive_str) = os_str.to_str() {
+                        let wide_drive: Vec<u16> = OsStr::new(drive_str)
+                            .encode_wide()
+                            .chain(std::iter::once(0))
+                            .collect();
+                            
+                        let mut free_bytes_available: winapi::um::winnt::ULARGE_INTEGER = std::mem::zeroed();
+                        let mut total_number_of_bytes: winapi::um::winnt::ULARGE_INTEGER = std::mem::zeroed();
+                        let mut total_number_of_free_bytes: winapi::um::winnt::ULARGE_INTEGER = std::mem::zeroed();
+                        
+                        let res = GetDiskFreeSpaceExW(
+                            wide_drive.as_ptr(),
+                            &mut free_bytes_available,
+                            &mut total_number_of_bytes,
+                            &mut total_number_of_free_bytes,
+                        );
+                        
+                        let (total_space, free_space) = if res != 0 {
+                            (*total_number_of_bytes.QuadPart(), *free_bytes_available.QuadPart())
+                        } else {
+                            (0, 0)
+                        };
+                        
+                        disks.push(DiskInfo {
+                            name: drive_str.to_string(),
+                            total_space,
+                            free_space,
+                        });
+                    }
+                }
+                start = i + 1;
+            }
+        }
+        Ok(disks)
+    }
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn get_disks() -> Result<Vec<DiskInfo>, String> {
+    Err("Not supported on non-Windows".to_string())
+}
+
+fn get_dir_size(path: &std::path::Path) -> u64 {
+    let mut total = 0;
+    let mut stack = vec![path.to_path_buf()];
+    let mut files_scanned = 0;
+    
+    while let Some(current_path) = stack.pop() {
+        if files_scanned > 2000 {
+            break;
+        }
+        if let Ok(entries) = std::fs::read_dir(current_path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if let Ok(meta) = entry.metadata() {
+                    total += meta.len();
+                    files_scanned += 1;
+                }
+            }
+        }
+    }
+    total
+}
+
+#[tauri::command]
+fn read_directory(path: String) -> Result<Vec<FileInfo>, String> {
+    let path_buf = std::path::Path::new(&path);
+    if !path_buf.exists() {
+        return Err("Directory does not exist".to_string());
+    }
+    if !path_buf.is_dir() {
+        return Err("Path is not a directory".to_string());
+    }
+    
+    let mut files = Vec::new();
+    let entries = std::fs::read_dir(path_buf).map_err(|e| e.to_string())?;
+    
+    for entry in entries {
+        if let Ok(entry) = entry {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_dir = path.is_dir();
+            
+            let metadata = entry.metadata().ok();
+            let size = if is_dir {
+                get_dir_size(&path)
+            } else {
+                metadata.as_ref().map(|m| m.len()).unwrap_or(0)
+            };
+            
+            let modified = metadata.as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+                
+            let extension = path.extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_default();
+                
+            files.push(FileInfo {
+                name,
+                path: path.to_string_lossy().to_string(),
+                is_dir,
+                size,
+                modified,
+                extension,
+            });
+        }
+    }
+    
+    files.sort_by(|a, b| {
+        if a.is_dir != b.is_dir {
+            b.is_dir.cmp(&a.is_dir)
+        } else {
+            a.name.to_lowercase().cmp(&b.name.to_lowercase())
+        }
+    });
+    
+    Ok(files)
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn get_system_icon(path: String, is_dir: bool, use_attr: bool) -> Result<String, String> {
+    use winapi::um::shellapi::{SHGetFileInfoW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_USEFILEATTRIBUTES, SHFILEINFOW};
+    use winapi::um::winuser::DestroyIcon;
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    let wide_path: Vec<u16> = OsStr::new(&path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    
+    unsafe {
+        let mut shfi: SHFILEINFOW = std::mem::zeroed();
+        let flags = SHGFI_ICON | SHGFI_LARGEICON | if use_attr { SHGFI_USEFILEATTRIBUTES } else { 0 };
+        
+        let file_attr = if is_dir {
+            winapi::um::winnt::FILE_ATTRIBUTE_DIRECTORY
+        } else {
+            winapi::um::winnt::FILE_ATTRIBUTE_NORMAL
+        };
+        
+        let res = SHGetFileInfoW(
+            wide_path.as_ptr(),
+            file_attr,
+            &mut shfi,
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            flags,
+        );
+        
+        if res == 0 || shfi.hIcon.is_null() {
+            return Err("Failed to get icon info from shell".to_string());
+        }
+        
+        let hicon = shfi.hIcon;
+        let base64_result = hicon_to_base64(hicon);
+        DestroyIcon(hicon);
+        base64_result
+    }
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn get_system_icon(_path: String, _is_dir: bool, _use_attr: bool) -> Result<String, String> {
+    Err("Not supported on non-Windows".to_string())
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn open_in_explorer(path: String) -> Result<(), String> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let path_buf = std::path::PathBuf::from(&path);
+    let mut cmd = Command::new("explorer.exe");
+    if path_buf.is_file() {
+        cmd.raw_arg(format!(r#"/select,"{}""#, path));
+    } else {
+        cmd.raw_arg(format!(r#""{}""#, path));
+    }
+    cmd.spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn open_in_explorer(_path: String) -> Result<(), String> {
+    Err("Not supported on non-Windows".to_string())
+}
+
+#[tauri::command]
+fn paste_file(src: String, dest_dir: String) -> Result<(), String> {
+    let src_path = std::path::Path::new(&src);
+    let file_name = src_path.file_name().ok_or("Invalid source file name")?;
+    let dest_path = std::path::Path::new(&dest_dir).join(file_name);
+    
+    if src_path.is_dir() {
+        copy_dir_all(src_path, &dest_path).map_err(|e| e.to_string())?;
+    } else {
+        std::fs::copy(src_path, dest_path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn copy_dir_all(src: impl AsRef<std::path::Path>, dst: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    std::fs::create_dir_all(&dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
+        } else {
+            std::fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_file(path: String) -> Result<(), String> {
+    let path_buf = std::path::Path::new(&path);
+    if path_buf.is_dir() {
+        std::fs::remove_dir_all(path_buf).map_err(|e| e.to_string())?;
+    } else {
+        std::fs::remove_file(path_buf).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LockProcessInfo {
+    pid: u32,
+    name: String,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(non_camel_case_types)]
+struct RM_UNIQUE_PROCESS {
+    dwProcessId: winapi::shared::minwindef::DWORD,
+    ProcessStartTime: winapi::shared::minwindef::FILETIME,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(non_camel_case_types)]
+struct RM_PROCESS_INFO {
+    Process: RM_UNIQUE_PROCESS,
+    strAppName: [winapi::um::winnt::WCHAR; 256],
+    strServiceShortName: [winapi::um::winnt::WCHAR; 64],
+    ApplicationType: i32,
+    AppStatus: winapi::shared::minwindef::ULONG,
+    TSSessionId: winapi::shared::minwindef::DWORD,
+    bGracefulShutdownRequired: winapi::shared::minwindef::BOOL,
+}
+
+#[cfg(windows)]
+#[link(name = "rstrtmgr")]
+extern "system" {
+    fn RmStartSession(
+        pSessionHandle: *mut winapi::shared::minwindef::DWORD,
+        dwSessionFlags: winapi::shared::minwindef::DWORD,
+        strSessionKey: winapi::um::winnt::LPWSTR,
+    ) -> winapi::shared::minwindef::DWORD;
+
+    fn RmRegisterResources(
+        dwSessionHandle: winapi::shared::minwindef::DWORD,
+        nFiles: winapi::shared::minwindef::UINT,
+        rgsFileNames: *const winapi::um::winnt::LPCWSTR,
+        nApplications: winapi::shared::minwindef::UINT,
+        rgApplications: *const RM_UNIQUE_PROCESS,
+        nServices: winapi::shared::minwindef::UINT,
+        rgsServiceNames: *const winapi::um::winnt::LPCWSTR,
+    ) -> winapi::shared::minwindef::DWORD;
+
+    fn RmGetList(
+        dwSessionHandle: winapi::shared::minwindef::DWORD,
+        pnProcInfoNeeded: *mut winapi::shared::minwindef::UINT,
+        pnProcInfo: *mut winapi::shared::minwindef::UINT,
+        rgAffectedApps: *mut RM_PROCESS_INFO,
+        lpdwRebootReasons: *mut winapi::shared::minwindef::DWORD,
+    ) -> winapi::shared::minwindef::DWORD;
+
+    fn RmEndSession(
+        dwSessionHandle: winapi::shared::minwindef::DWORD,
+    ) -> winapi::shared::minwindef::DWORD;
+}
+
+#[cfg(windows)]
+fn get_lock_processes(path: &str) -> Result<Vec<LockProcessInfo>, String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    
+    let wide_path: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+        
+    unsafe {
+        let mut session_handle: winapi::shared::minwindef::DWORD = 0;
+        let mut session_key = [0u16; 33];
+        
+        let res = RmStartSession(&mut session_handle, 0, session_key.as_mut_ptr());
+        if res != 0 {
+            return Err(format!("RmStartSession failed with error code {}", res));
+        }
+        
+        let file_paths = [wide_path.as_ptr()];
+        let res = RmRegisterResources(
+            session_handle,
+            1,
+            file_paths.as_ptr(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+        );
+        
+        if res != 0 {
+            RmEndSession(session_handle);
+            return Err(format!("RmRegisterResources failed with error code {}", res));
+        }
+        
+        let mut proc_info_needed: winapi::shared::minwindef::UINT = 0;
+        let mut proc_info_count: winapi::shared::minwindef::UINT = 0;
+        let mut reboot_reasons: winapi::shared::minwindef::DWORD = 0;
+        
+        let res = RmGetList(
+            session_handle,
+            &mut proc_info_needed,
+            &mut proc_info_count,
+            std::ptr::null_mut(),
+            &mut reboot_reasons,
+        );
+        
+        if res != 0 && res != 234 {
+            RmEndSession(session_handle);
+            return Ok(Vec::new());
+        }
+        
+        if proc_info_needed == 0 {
+            RmEndSession(session_handle);
+            return Ok(Vec::new());
+        }
+        
+        proc_info_count = proc_info_needed;
+        let mut proc_info_list = vec![std::mem::zeroed::<RM_PROCESS_INFO>(); proc_info_count as usize];
+        
+        let res = RmGetList(
+            session_handle,
+            &mut proc_info_needed,
+            &mut proc_info_count,
+            proc_info_list.as_mut_ptr(),
+            &mut reboot_reasons,
+        );
+        
+        if res != 0 {
+            RmEndSession(session_handle);
+            return Err(format!("RmGetList failed with error code {}", res));
+        }
+        
+        let mut processes = Vec::new();
+        for i in 0..proc_info_count as usize {
+            let info = &proc_info_list[i];
+            let pid = info.Process.dwProcessId;
+            
+            let len = info.strAppName.iter().position(|&c| c == 0).unwrap_or(info.strAppName.len());
+            let app_name = String::from_utf16_lossy(&info.strAppName[..len]);
+            
+            processes.push(LockProcessInfo {
+                pid,
+                name: app_name,
+            });
+        }
+        
+        RmEndSession(session_handle);
+        Ok(processes)
+    }
+}
+
+#[cfg(windows)]
+fn move_to_recycle_bin(path: &str) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::um::shellapi::{SHFileOperationW, SHFILEOPSTRUCTW, FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT, FOF_NOERRORUI};
+    
+    let mut wide_path: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .collect();
+    wide_path.push(0);
+    wide_path.push(0);
+    
+    unsafe {
+        let mut fileop: SHFILEOPSTRUCTW = std::mem::zeroed();
+        fileop.wFunc = FO_DELETE as u32;
+        fileop.pFrom = wide_path.as_ptr();
+        fileop.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+        
+        let res = SHFileOperationW(&mut fileop);
+        if res == 0 && fileop.fAnyOperationsAborted == 0 {
+            Ok(())
+        } else {
+            Err(format!("SHFileOperationW failed with code {}", res))
+        }
+    }
+}
+
+#[tauri::command]
+fn get_file_lock_processes(path: String) -> Result<Vec<LockProcessInfo>, String> {
+    #[cfg(windows)]
+    {
+        get_lock_processes(&path)
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Chỉ hỗ trợ trên Windows".to_string())
+    }
+}
+
+#[tauri::command]
+async fn force_delete_file(path: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        use std::os::windows::process::CommandExt;
+        
+        if let Ok(locks) = get_lock_processes(&path) {
+            for lock in locks {
+                let _ = Command::new("taskkill")
+                    .args(["/F", "/PID", &lock.pid.to_string()])
+                    .creation_flags(0x08000000)
+                    .output();
+            }
+        }
+        
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        
+        if let Err(e) = move_to_recycle_bin(&path) {
+            let path_buf = std::path::Path::new(&path);
+            if path_buf.is_dir() {
+                std::fs::remove_dir_all(path_buf).map_err(|err| format!("Xóa thư mục thất bại: {} (Lỗi Recycle Bin: {})", err, e))?;
+            } else {
+                std::fs::remove_file(path_buf).map_err(|err| format!("Xóa file thất bại: {} (Lỗi Recycle Bin: {})", err, e))?;
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Chỉ hỗ trợ trên Windows".to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Check for local WebView2 Fixed Version
@@ -707,19 +1336,56 @@ pub fn run() {
         .manage(ProcessManager::new())
         .manage(AppSettings { minimize_to_tray: Mutex::new(false) })
         .setup(|app| {
-            let show = MenuItem::with_id(app, "show", "Show AppCtrl", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let menu = build_tray_menu(app.handle())?;
             
-            let _tray = TrayIconBuilder::new()
+            let _tray = TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
                 .tooltip("AppCtrl")
                 .on_menu_event(move |app, event| {
-                    match event.id.as_ref() {
-                        "show" => show_main_window(app),
-                        "quit" => app.exit(0),
-                        _ => {}
+                    let id = event.id.as_ref();
+                    if id == "show" {
+                         show_main_window(app);
+                    } else if id == "quit" {
+                         app.exit(0);
+                    } else if id.starts_with("toggle_app:") {
+                         let app_id = id.strip_prefix("toggle_app:").unwrap().to_string();
+                         let app_handle = app.clone();
+                         
+                         tauri::async_runtime::spawn(async move {
+                             // Load config to get app details
+                             let config_json = load_config().unwrap_or_else(|_| "{}".to_string());
+                             let config: ConfigData = serde_json::from_str(&config_json).unwrap_or_default();
+                             
+                             if let Some(apps) = config.apps {
+                                 if let Some(app_conf) = apps.iter().find(|a| a.id == app_id) {
+                                     let is_running = check_process_running(app_conf.executable_path.clone());
+                                     
+                                     if is_running {
+                                         // Stop
+                                         let _ = stop_app(app_handle.clone(), app_id.clone(), Some(app_conf.executable_path.clone())).await;
+                                     } else {
+                                         // Start
+                                         let _ = start_app(
+                                             app_handle.clone(),
+                                             app_id.clone(),
+                                             app_conf.executable_path.clone(),
+                                             app_conf.app_type.clone(),
+                                             app_conf.working_directory.clone().unwrap_or_default(),
+                                             app_conf.arguments.clone().unwrap_or_default(),
+                                             app_conf.environment_vars.clone().unwrap_or_default()
+                                         ).await;
+                                     }
+                                     
+                                     // Rebuild and update menu
+                                     if let Ok(new_menu) = build_tray_menu(&app_handle) {
+                                         if let Some(tray) = app_handle.tray_by_id("main") {
+                                             let _ = tray.set_menu(Some(new_menu));
+                                         }
+                                     }
+                                 }
+                             }
+                         });
                     }
                 })
                 .on_tray_icon_event(|tray: &tauri::tray::TrayIcon, event| {
@@ -761,7 +1427,15 @@ pub fn run() {
             get_listening_ports,
             kill_process_by_pid,
             kill_process_by_name,
-            get_processes
+            get_processes,
+            get_disks,
+            read_directory,
+            get_system_icon,
+            open_in_explorer,
+            paste_file,
+            delete_file,
+            get_file_lock_processes,
+            force_delete_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
